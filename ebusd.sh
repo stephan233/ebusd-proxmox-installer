@@ -1,55 +1,57 @@
-#!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
-
-# ----------------------------------------------------------------------------
-# Title:         ebusd LXC Installer for Proxmox
-# Author:        Stephan Putzke
-# License:       MIT
-# Source:        https://github.com/stephan233/ebusd-proxmox-installer
-# Description:   Installs and configures ebusd in an LXC container on Proxmox
-# ----------------------------------------------------------------------------
-
+#!/bin/bash
 set -e
 
-# Colored output
-GREEN="\033[1;32m"
-YELLOW="\033[1;33m"
-NC="\033[0m"
-
-# === User input ===
-echo -e "${YELLOW}🔧 Please enter the IP address of your eBus LAN adapter (e.g. 192.168.1.100):${NC}"
-read -rp "Adapter IP: " EBUS_ADAPTER_IP
-
-# === Configuration ===
 CONFIG_DIR="/etc/ebusd"
 REPO_URL="https://github.com/john30/ebusd-configuration.git"
 BRANCH="master"
 LOGFILE="/var/log/ebusd.log"
 
-# === Install ebusd ===
-echo -e "${GREEN}📦 Installing ebusd and Git...${NC}"
+echo "Updating package lists..."
 apt update
-apt install -y ebusd git
 
-# === Create logfile ===
+echo "Installing dependencies..."
+apt install -y wget git apt-transport-https ca-certificates
+
+# Hole neueste Version von GitHub Releases via GitHub API
+echo "Fetching latest ebusd release info from GitHub..."
+LATEST_URL=$(curl -s https://api.github.com/repos/john30/ebusd/releases/latest \
+  | grep "browser_download_url" \
+  | grep "amd64.deb" \
+  | cut -d '"' -f 4)
+
+if [ -z "$LATEST_URL" ]; then
+  echo "ERROR: Could not find latest .deb release URL."
+  exit 1
+fi
+
+echo "Downloading latest ebusd package..."
+wget -q --show-progress "$LATEST_URL" -O /tmp/ebusd_latest.deb
+
+echo "Installing ebusd package..."
+dpkg -i /tmp/ebusd_latest.deb || apt-get install -f -y
+
+echo "Cleaning up..."
+rm /tmp/ebusd_latest.deb
+
+# Erstelle logfile falls nicht vorhanden
 touch "$LOGFILE"
 chown ebusd:ebusd "$LOGFILE"
 
-# === Set ebusd startup options ===
-echo -e "${GREEN}⚙️ Configuring startup options...${NC}"
-sed -i 's|^EBUSD_OPTS=.*|EBUSD_OPTS="-d '"$EBUS_ADAPTER_IP"':23 --scanconfig --latency=50 --loglevel=info --logfile='"$LOGFILE"'"|' /etc/default/ebusd
+# Konfiguriere ebusd mit Adapter-IP
+echo "Please enter the IP address of your eBus LAN adapter (e.g. 192.168.1.100):"
+read -rp "Adapter IP: " EBUS_ADAPTER_IP
 
-# === Download configuration files ===
-echo -e "${GREEN}📥 Downloading configuration files (branch: $BRANCH)...${NC}"
+echo "Configuring ebusd startup options..."
+sed -i "s|^EBUSD_OPTS=.*|EBUSD_OPTS=\"-d $EBUS_ADAPTER_IP:23 --scanconfig --latency=50 --loglevel=info --logfile=$LOGFILE\"|" /etc/default/ebusd
+
+echo "Cloning configuration files from $REPO_URL (branch: $BRANCH)..."
 TMP_DIR=$(mktemp -d)
-
 git clone --depth=1 --branch "$BRANCH" "$REPO_URL" "$TMP_DIR"
 
-# Backup existing config
 if [ -d "$CONFIG_DIR" ]; then
-    BACKUP_DIR="${CONFIG_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
-    echo -e "${YELLOW}🔁 Backing up existing configuration to $BACKUP_DIR${NC}"
-    cp -r "$CONFIG_DIR" "$BACKUP_DIR"
+  BACKUP_DIR="${CONFIG_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
+  echo "Backing up existing config to $BACKUP_DIR"
+  cp -r "$CONFIG_DIR" "$BACKUP_DIR"
 fi
 
 mkdir -p "$CONFIG_DIR"
@@ -57,15 +59,11 @@ cp -r "$TMP_DIR"/ebusd* "$CONFIG_DIR/"
 rm -rf "$TMP_DIR"
 chown -R ebusd:ebusd "$CONFIG_DIR"
 
-echo -e "${GREEN}✅ Configuration files installed to $CONFIG_DIR${NC}"
-
-# === Enable and start service ===
-echo -e "${GREEN}🚀 Enabling and starting ebusd...${NC}"
+echo "Enabling and restarting ebusd service..."
 systemctl enable ebusd
 systemctl restart ebusd
 
-# === Show status ===
-echo -e "${GREEN}📄 Service status:${NC}"
-systemctl status ebusd --no-pager
-
-echo -e "${YELLOW}ℹ️ View the log with: tail -f $LOGFILE${NC}"
+echo "Installation complete. Check status with:"
+echo "  systemctl status ebusd --no-pager"
+echo "View logs with:"
+echo "  tail -f $LOGFILE"
