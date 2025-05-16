@@ -1,69 +1,65 @@
 #!/bin/bash
+
 set -e
 
+CTID=100
+HOSTNAME="ebusd-container"
+TEMPLATE="local:vztmpl/debian-11-standard_11.7-1_amd64.tar.gz"
+MEMORY=1024
+STORAGE="local-lvm"
+ROOTFS_SIZE="8"
+BRIDGE="vmbr0"
 CONFIG_DIR="/etc/ebusd"
 REPO_URL="https://github.com/john30/ebusd-configuration.git"
-BRANCH="master"
+BRANCH="vaillant"
 LOGFILE="/var/log/ebusd.log"
 
-echo "Updating package lists..."
-apt update
-
-echo "Installing dependencies..."
-apt install -y wget git apt-transport-https ca-certificates
-
-# Hole neueste Version von GitHub Releases via GitHub API
-echo "Fetching latest ebusd release info from GitHub..."
-LATEST_URL=$(curl -s https://api.github.com/repos/john30/ebusd/releases/latest \
-  | grep "browser_download_url" \
-  | grep "amd64.deb" \
-  | cut -d '"' -f 4)
-
-if [ -z "$LATEST_URL" ]; then
-  echo "ERROR: Could not find latest .deb release URL."
-  exit 1
+echo "🚀 Lade Debian 11 LXC Template herunter (falls nicht vorhanden)..."
+if ! pct template | grep -q "debian-11-standard"; then
+  pct download $CTID local debian-11-standard_11.7-1_amd64.tar.gz
 fi
 
-echo "Downloading latest ebusd package..."
-wget -q --show-progress "$LATEST_URL" -O /tmp/ebusd_latest.deb
+echo "📦 Erstelle LXC Container mit ID $CTID..."
+pct create $CTID $TEMPLATE \
+  --hostname $HOSTNAME \
+  --memory $MEMORY \
+  --net0 name=eth0,bridge=$BRIDGE,ip=dhcp \
+  --rootfs $STORAGE:$ROOTFS_SIZE \
+  --features nesting=1
 
-echo "Installing ebusd package..."
-dpkg -i /tmp/ebusd_latest.deb || apt-get install -f -y
+echo "▶️ Starte Container $CTID..."
+pct start $CTID
 
-echo "Cleaning up..."
-rm /tmp/ebusd_latest.deb
+echo "🔧 Installiere ebusd und git im Container..."
+pct exec $CTID -- bash -c "apt update && apt install -y ebusd git"
 
-# Erstelle logfile falls nicht vorhanden
-touch "$LOGFILE"
-chown ebusd:ebusd "$LOGFILE"
+# eBus LAN Adapter IP abfragen
+read -rp "🔧 Bitte die IP-Adresse deines eBus LAN Adapters eingeben (z.B. 192.168.1.100): " ADAPTER_IP
 
-# Konfiguriere ebusd mit Adapter-IP
-echo "Please enter the IP address of your eBus LAN adapter (e.g. 192.168.1.100):"
-read -rp "Adapter IP: " EBUS_ADAPTER_IP
+echo "⚙️ Konfiguriere ebusd im Container..."
 
-echo "Configuring ebusd startup options..."
-sed -i "s|^EBUSD_OPTS=.*|EBUSD_OPTS=\"-d $EBUS_ADAPTER_IP:23 --scanconfig --latency=50 --loglevel=info --logfile=$LOGFILE\"|" /etc/default/ebusd
+# Setze ebusd Startoptionen im Container
+pct exec $CTID -- bash -c "sed -i '/^EBUSD_OPTS=/d' /etc/default/ebusd"
+pct exec $CTID -- bash -c "echo 'EBUSD_OPTS=\"-d $ADAPTER_IP:23 --scanconfig --latency=50 --loglevel=info --logfile=$LOGFILE\"' >> /etc/default/ebusd"
 
-echo "Cloning configuration files from $REPO_URL (branch: $BRANCH)..."
-TMP_DIR=$(mktemp -d)
-git clone --depth=1 --branch "$BRANCH" "$REPO_URL" "$TMP_DIR"
+# Erstelle Logfile und setze Rechte
+pct exec $CTID -- bash -c "touch $LOGFILE && chown ebusd:ebusd $LOGFILE"
 
-if [ -d "$CONFIG_DIR" ]; then
-  BACKUP_DIR="${CONFIG_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
-  echo "Backing up existing config to $BACKUP_DIR"
-  cp -r "$CONFIG_DIR" "$BACKUP_DIR"
-fi
+echo "📥 Lade ebusd Konfigurationsdateien aus GitHub (Branch $BRANCH) in den Container..."
 
-mkdir -p "$CONFIG_DIR"
-cp -r "$TMP_DIR"/ebusd* "$CONFIG_DIR/"
-rm -rf "$TMP_DIR"
-chown -R ebusd:ebusd "$CONFIG_DIR"
+TMP_DIR="/tmp/ebusd_conf_$$"
 
-echo "Enabling and restarting ebusd service..."
-systemctl enable ebusd
-systemctl restart ebusd
+pct exec $CTID -- bash -c "apt install -y git"
 
-echo "Installation complete. Check status with:"
-echo "  systemctl status ebusd --no-pager"
-echo "View logs with:"
-echo "  tail -f $LOGFILE"
+# Klone Repo, kopiere Config, bereinige
+pct exec $CTID -- bash -c "rm -rf $TMP_DIR"
+pct exec $CTID -- bash -c "git clone --depth=1 --branch $BRANCH $REPO_URL $TMP_DIR"
+pct exec $CTID -- bash -c "mkdir -p $CONFIG_DIR"
+pct exec $CTID -- bash -c "cp -r $TMP_DIR/ebusd* $CONFIG_DIR/"
+pct exec $CTID -- bash -c "rm -rf $TMP_DIR"
+pct exec $CTID -- bash -c "chown -R ebusd:ebusd $CONFIG_DIR"
+
+echo "🔄 Starte ebusd Dienst neu im Container..."
+pct exec $CTID -- systemctl restart ebusd
+
+echo "✅ Fertig! D
